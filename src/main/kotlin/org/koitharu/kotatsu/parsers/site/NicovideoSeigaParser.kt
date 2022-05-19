@@ -2,15 +2,36 @@ package org.koitharu.kotatsu.parsers.site
 
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaParser
+import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
+import org.koitharu.kotatsu.parsers.exception.AuthRequiredException
 import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import java.util.*
 
 @MangaSourceParser("NICOVIDEOSEIGA", "Nicovideo Seiga", "ja")
-class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaParser(MangaSource.NICOVIDEOSEIGA) {
+class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaParser(MangaSource.NICOVIDEOSEIGA),
+	MangaParserAuthProvider {
+
+	override val authUrl: String
+		get() = "https://${getDomain()}/login"
+
+	override val isAuthorized: Boolean
+		get() {
+			return context.cookieJar.getCookies(getDomain()).any {
+				it.value.startsWith("user_session_")
+			}
+		}
+
+	override suspend fun getUsername(): String {
+		val body = context.httpGet("https://nicovideo.jp/my").parseHtml().body()
+		if (body.baseUri().endsWith("/login")) {
+			throw AuthRequiredException(source)
+		}
+		return body.selectFirst(".UserDetailsHeader-nickname")?.text() ?: parseFailed("Cannot find username")
+	}
 
 	override val sortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.UPDATED,
