@@ -1,33 +1,18 @@
 package org.koitharu.kotatsu.parsers.site
 
-import okhttp3.Headers
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaParser
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.model.*
+import org.koitharu.kotatsu.parsers.util.host
 import org.koitharu.kotatsu.parsers.util.parseHtml
+import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
 import org.koitharu.kotatsu.parsers.util.toIntUp
 import java.util.*
 
 @MangaSourceParser("NICOVIDEOSEIGA", "Nicovideo Seiga", "ja")
 class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaParser(MangaSource.NICOVIDEOSEIGA) {
-
-	private val headers = Headers.Builder()
-		.set("referer", "https://seiga.nicovideo.jp/")
-		.set("accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-		.set("pragma", "no-cache")
-		.set("cache-control", "no-cache")
-		.set("accept-encoding", "gzip, deflate, br")
-		.set(
-			"user-agent",
-			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36"
-		)
-		.set("sec-fetch-dest", "image")
-		.set("sec-fetch-mode", "no-cors")
-		.set("sec-fetch-site", "cross-site")
-		.set("sec-gpc", "1")
-		.build()
 
 	override val sortOrders: Set<SortOrder>
 		get() = Collections.singleton(SortOrder.UPDATED)
@@ -42,7 +27,7 @@ class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaPars
 	): List<Manga> {
 		val page = (offset / 20f).toIntUp().inc()
 		val url = "/manga/list?page=$page&sort=manga_updated".withDomain()
-		val doc = context.httpGet(url, headers).parseHtml()
+		val doc = context.httpGet(url).parseHtml()
 		val comicList = doc.body().select("#comic_list > ul > li") ?: parseFailed("Container not found")
 		val items = comicList.select("div > .description > div > div")
 		return items.mapNotNull { item ->
@@ -63,14 +48,14 @@ class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaPars
 					"完結" -> MangaState.FINISHED
 					else -> null
 				},
-				publicUrl = "",
+				publicUrl = href.toAbsoluteUrl(item.host ?: getDomain()),
 				source = source,
 			)
 		}
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val doc = context.httpGet(manga.url.withDomain(), headers).parseHtml()
+		val doc = context.httpGet(manga.url.withDomain()).parseHtml()
 		val contents = doc.body().select("#contents") ?: parseFailed("Cannot find root")
 		val statusText = contents.select("div.mg_work_detail > div > div:nth-child(2) > div.tip.content_status.status_series > span").text()
 		return manga.copy(
