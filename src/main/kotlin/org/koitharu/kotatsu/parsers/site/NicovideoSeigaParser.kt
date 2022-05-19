@@ -4,18 +4,18 @@ import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaParser
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
+import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
-import org.koitharu.kotatsu.parsers.util.host
-import org.koitharu.kotatsu.parsers.util.parseHtml
-import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
-import org.koitharu.kotatsu.parsers.util.toIntUp
+import org.koitharu.kotatsu.parsers.util.*
 import java.util.*
 
 @MangaSourceParser("NICOVIDEOSEIGA", "Nicovideo Seiga", "ja")
 class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaParser(MangaSource.NICOVIDEOSEIGA) {
 
-	override val sortOrders: Set<SortOrder>
-		get() = Collections.singleton(SortOrder.UPDATED)
+	override val sortOrders: Set<SortOrder> = EnumSet.of(
+		SortOrder.UPDATED,
+		SortOrder.POPULARITY,
+	)
 
 	override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain("seiga.nicovideo.jp", null)
 
@@ -26,7 +26,7 @@ class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaPars
 		sortOrder: SortOrder?,
 	): List<Manga> {
 		val page = (offset / 20f).toIntUp().inc()
-		val url = "/manga/list?page=$page&sort=manga_updated".withDomain()
+		val url = "/manga/list?page=$page&sort=${getSortKey(sortOrder)}".withDomain()
 		val doc = context.httpGet(url).parseHtml()
 		val comicList = doc.body().select("#comic_list > ul > li") ?: parseFailed("Container not found")
 		val items = comicList.select("div > .description > div > div")
@@ -39,7 +39,7 @@ class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaPars
 				coverUrl = item.select(".comic_icon > div > a > img").attr("src"),
 				altTitle = null,
 				author = item.select(".mg_description_header > .mg_author > a").text() ?: return@mapNotNull null,
-				rating = 0F,
+				rating = RATING_UNKNOWN,
 				url = href,
 				isNsfw = false,
 				tags = emptySet(),
@@ -83,10 +83,32 @@ class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaPars
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		TODO("Not yet implemented")
+		val fullUrl = chapter.url.withDomain()
+		val doc = context.httpGet(fullUrl).parseHtml()
+		if (doc.select("#login_manga").isEmpty())
+			throw ParseException("Not logged in.")
+		val root = doc.body().select("#page_contents > li")
+			?: throw ParseException("Root not found")
+		return root.map { li ->
+			val url = li.select("div > img").attr("data-original")
+			MangaPage(
+				id = li.attr("data-page-index").toLong(),
+				url = url,
+				preview = null,
+				referer = fullUrl,
+				source = source,
+			)
+		}
 	}
 
 	override suspend fun getTags(): Set<MangaTag> {
-		TODO("Not yet implemented")
+		return emptySet()
 	}
+
+	private fun getSortKey(sortOrder: SortOrder?) =
+		when (sortOrder ?: sortOrders.minByOrNull { it.ordinal }) {
+			SortOrder.POPULARITY -> "manga_view"
+			SortOrder.UPDATED -> "manga_updated"
+			else -> "rate"
+		}
 }
