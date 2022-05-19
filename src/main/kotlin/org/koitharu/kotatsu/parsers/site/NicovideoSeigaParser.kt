@@ -16,7 +16,7 @@ class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaPars
 	MangaParserAuthProvider {
 
 	override val authUrl: String
-		get() = "https://${getDomain()}/login"
+		get() = "https://account.nicovideo.jp/login?site=seiga"
 
 	override val isAuthorized: Boolean
 		get() {
