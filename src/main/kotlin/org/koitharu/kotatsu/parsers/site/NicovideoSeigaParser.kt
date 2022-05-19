@@ -8,6 +8,7 @@ import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.parseHtml
 import org.koitharu.kotatsu.parsers.util.toIntUp
+import java.util.*
 
 @MangaSourceParser("NICOVIDEOSEIGA", "Nicovideo Seiga", "ja")
 class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaParser(MangaSource.NICOVIDEOSEIGA) {
@@ -29,7 +30,7 @@ class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaPars
 		.build()
 
 	override val sortOrders: Set<SortOrder>
-		get() = TODO("Not yet implemented")
+		get() = Collections.singleton(SortOrder.UPDATED)
 
 	override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain("seiga.nicovideo.jp", null)
 
