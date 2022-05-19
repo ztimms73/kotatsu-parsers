@@ -21,7 +21,7 @@ class NicovideoSeigaParser(override val context: MangaLoaderContext) : MangaPars
 	override val isAuthorized: Boolean
 		get() {
 			return context.cookieJar.getCookies(getDomain()).any {
-				it.value.startsWith("user_session_")
+				it.name == "user_session"
 			}
 		}
 
