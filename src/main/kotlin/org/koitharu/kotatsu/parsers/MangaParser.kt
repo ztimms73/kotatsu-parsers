@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
 import java.util.*
 
-abstract class MangaParser(val source: MangaSource) {
+abstract class MangaParser @InternalParsersApi constructor(val source: MangaSource) {
 
 	protected abstract val context: MangaLoaderContext
 
@@ -36,12 +36,21 @@ abstract class MangaParser(val source: MangaSource) {
 	 * @param tags genres for filtering, values from [getTags] and [Manga.tags]. May be null or empty
 	 * @param sortOrder one of [sortOrders] or null for default value
 	 */
+	@InternalParsersApi
 	abstract suspend fun getList(
 		offset: Int,
-		query: String? = null,
-		tags: Set<MangaTag>? = null,
-		sortOrder: SortOrder? = null,
+		query: String?,
+		tags: Set<MangaTag>?,
+		sortOrder: SortOrder,
 	): List<Manga>
+
+	suspend fun getList(offset: Int, query: String?): List<Manga> {
+		return getList(offset, query, null, getDefaultSortOrder())
+	}
+
+	suspend fun getList(offset: Int, tags: Set<MangaTag>?, sortOrder: SortOrder?): List<Manga> {
+		return getList(offset, null, tags, sortOrder ?: getDefaultSortOrder())
+	}
 
 	/**
 	 * Parse details for [Manga]: chapters list, description, large cover, etc.
@@ -127,6 +136,12 @@ abstract class MangaParser(val source: MangaSource) {
 			domain = subdomain + "." + domain.removePrefix("www.")
 		}
 		return toAbsoluteUrl(domain)
+	}
+
+	private fun getDefaultSortOrder(): SortOrder {
+		return checkNotNull(sortOrders.minByOrNull { it.ordinal }) {
+			"sortOrders should have at least one value"
+		}
 	}
 
 	@InternalParsersApi
