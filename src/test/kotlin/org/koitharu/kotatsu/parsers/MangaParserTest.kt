@@ -2,7 +2,6 @@ package org.koitharu.kotatsu.parsers
 
 import kotlinx.coroutines.test.runTest
 import okhttp3.HttpUrl
-import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.extension.ExtendWith
 import org.junit.jupiter.params.ParameterizedTest
@@ -16,30 +15,43 @@ import org.koitharu.kotatsu.test_util.isDistinctBy
 import org.koitharu.kotatsu.test_util.isUrlAbsolute
 import org.koitharu.kotatsu.test_util.maxDuplicates
 
+
 @ExtendWith(AuthCheckExtension::class)
 internal class MangaParserTest {
 
 	private val context = MangaLoaderContextMock()
 
-	@ParameterizedTest
+	@ParameterizedTest(name = "{index}|list|{0}")
 	@MangaSources
 	fun list(source: MangaSource) = runTest {
 		val parser = source.newParser(context)
-		val list = parser.getList(20, query = null, sortOrder = SortOrder.POPULARITY, tags = null)
+		val list = parser.getList(20, sortOrder = SortOrder.POPULARITY, tags = null)
 		checkMangaList(list, "list")
 		assert(list.all { it.source == source })
 	}
 
-	@ParameterizedTest
+	@ParameterizedTest(name = "{index}|pagination|{0}")
+	@MangaSources
+	fun pagination(source: MangaSource) = runTest {
+		val parser = source.newParser(context)
+		val page1 = parser.getList(0, sortOrder = null, tags = null)
+		val page2 = parser.getList(page1.size, sortOrder = null, tags = null)
+		val intersection = page1.intersect(page2.toSet())
+		assert(intersection.isEmpty()) {
+			"Pages are intersected: " + intersection.joinToString { it.publicUrl }
+		}
+	}
+
+	@ParameterizedTest(name = "{index}|search|{0}")
 	@MangaSources
 	fun search(source: MangaSource) = runTest {
 		val parser = source.newParser(context)
-		val subject = parser.getList(20, query = null, sortOrder = SortOrder.POPULARITY, tags = null).minByOrNull {
+		val subject = parser.getList(20, sortOrder = SortOrder.POPULARITY, tags = null).minByOrNull {
 			it.title.length
 		} ?: error("No manga found")
 		val query = subject.title
 		check(query.isNotBlank()) { "Manga title '$query' is blank" }
-		val list = parser.getList(offset = 0, query, sortOrder = null, tags = null)
+		val list = parser.getList(0, query)
 		assert(list.singleOrNull { it.url == subject.url && it.id == subject.id } != null) {
 			"Single subject '${subject.title} (${subject.publicUrl})' not found in search results"
 		}
@@ -47,7 +59,7 @@ internal class MangaParserTest {
 		assert(list.all { it.source == source })
 	}
 
-	@ParameterizedTest
+	@ParameterizedTest(name = "{index}|tags|{0}")
 	@MangaSources
 	fun tags(source: MangaSource) = runTest {
 		val parser = source.newParser(context)
@@ -62,16 +74,16 @@ internal class MangaParserTest {
 		assert(tags.all { it.source == source })
 
 		val tag = tags.last()
-		val list = parser.getList(offset = 0, tags = setOf(tag), query = null, sortOrder = null)
+		val list = parser.getList(offset = 0, tags = setOf(tag), sortOrder = null)
 		checkMangaList(list, "${tag.title} (${tag.key})")
 		assert(list.all { it.source == source })
 	}
 
-	@ParameterizedTest
+	@ParameterizedTest(name = "{index}|details|{0}")
 	@MangaSources
 	fun details(source: MangaSource) = runTest {
 		val parser = source.newParser(context)
-		val list = parser.getList(20, query = null, sortOrder = SortOrder.POPULARITY, tags = null)
+		val list = parser.getList(20, sortOrder = SortOrder.POPULARITY, tags = null)
 		val manga = list[3]
 		parser.getDetails(manga).apply {
 			assert(!chapters.isNullOrEmpty()) { "Chapters are null or empty" }
@@ -96,11 +108,11 @@ internal class MangaParserTest {
 		}
 	}
 
-	@ParameterizedTest
+	@ParameterizedTest(name = "{index}|pages|{0}")
 	@MangaSources
 	fun pages(source: MangaSource) = runTest {
 		val parser = source.newParser(context)
-		val list = parser.getList(20, query = null, sortOrder = SortOrder.POPULARITY, tags = null)
+		val list = parser.getList(20, sortOrder = SortOrder.POPULARITY, tags = null)
 		val manga = list.first()
 		val chapter = parser.getDetails(manga).chapters?.firstOrNull() ?: error("Chapter is null")
 		val pages = parser.getPages(chapter)
@@ -116,16 +128,23 @@ internal class MangaParserTest {
 		checkImageRequest(pageUrl, page.referer)
 	}
 
-	@ParameterizedTest
+	@ParameterizedTest(name = "{index}|favicon|{0}")
 	@MangaSources
 	fun favicon(source: MangaSource) = runTest {
 		val parser = source.newParser(context)
-		val faviconUrl = parser.getFaviconUrl()
-		assert(faviconUrl.isUrlAbsolute())
-		checkImageRequest(faviconUrl, null)
+		val favicons = parser.getFavicons()
+		val types = setOf("png", "svg", "ico", "gif", "jpg", "jpeg")
+		assert(favicons.isNotEmpty())
+		favicons.forEach {
+			assert(it.url.isUrlAbsolute()) { "Favicon url is not absolute: ${it.url}" }
+			assert(it.type in types) { "Unknown icon type: ${it.type}" }
+		}
+		val favicon = favicons.find(24)
+		checkNotNull(favicon)
+		checkImageRequest(favicon.url, favicons.referer)
 	}
 
-	@ParameterizedTest
+	@ParameterizedTest(name = "{index}|domain|{0}")
 	@MangaSources
 	fun domain(source: MangaSource) = runTest {
 		val parser = source.newParser(context)
@@ -134,12 +153,16 @@ internal class MangaParserTest {
 			.host(defaultDomain)
 			.scheme("https")
 			.toString()
-		val response = context.doRequest(url)
-		val realDomain = response.request.url.host
-		assertEquals(defaultDomain, realDomain)
+		val response = context.doRequest(url, extraHeaders = parser.headers)
+		val realUrl = response.request.url
+		val realDomain = realUrl.topPrivateDomain()
+		val realHost = realUrl.host
+		assert(defaultDomain == realHost || defaultDomain == realDomain) {
+			"Domain mismatch:\nRequired:\t\t\t$defaultDomain\nActual:\t\t\t$realDomain\nHost:\t\t\t$realHost"
+		}
 	}
 
-	@ParameterizedTest
+	@ParameterizedTest(name = "{index}|authorization|{0}")
 	@MangaSources
 	@Disabled
 	fun authorization(source: MangaSource) = runTest {

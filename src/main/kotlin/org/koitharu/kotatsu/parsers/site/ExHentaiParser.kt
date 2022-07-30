@@ -2,12 +2,11 @@ package org.koitharu.kotatsu.parsers.site
 
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
-import org.koitharu.kotatsu.parsers.MangaParser
 import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
 import org.koitharu.kotatsu.parsers.MangaSourceParser
+import org.koitharu.kotatsu.parsers.PagedMangaParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.exception.AuthRequiredException
-import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import java.util.*
@@ -19,7 +18,7 @@ private const val DOMAIN_AUTHORIZED = "exhentai.org"
 @MangaSourceParser("EXHENTAI", "ExHentai")
 internal class ExHentaiParser(
 	override val context: MangaLoaderContext,
-) : MangaParser(MangaSource.EXHENTAI), MangaParserAuthProvider {
+) : PagedMangaParser(MangaSource.EXHENTAI, pageSize = 25), MangaParserAuthProvider {
 
 	override val sortOrders: Set<SortOrder> = Collections.singleton(
 		SortOrder.NEWEST,
@@ -57,13 +56,12 @@ internal class ExHentaiParser(
 		context.cookieJar.insertCookies(DOMAIN_UNAUTHORIZED, "nw=1", "sl=dm_2")
 	}
 
-	override suspend fun getList(
-		offset: Int,
+	override suspend fun getListPage(
+		page: Int,
 		query: String?,
 		tags: Set<MangaTag>?,
-		sortOrder: SortOrder?,
+		sortOrder: SortOrder,
 	): List<Manga> {
-		val page = (offset / 25f).toIntUp()
 		var search = query?.urlEncoded().orEmpty()
 		val url = buildString {
 			append("https://")
@@ -95,19 +93,19 @@ internal class ExHentaiParser(
 		val root = body.selectFirst("table.itg")
 			?.selectFirst("tbody")
 			?: if (updateDm) {
-				parseFailed("Cannot find root")
+				body.parseFailed("Cannot find root")
 			} else {
 				updateDm = true
-				return getList(offset, query, tags, sortOrder)
+				return getListPage(page, query, tags, sortOrder)
 			}
 		updateDm = false
 		return root.children().mapNotNull { tr ->
 			if (tr.childrenSize() != 2) return@mapNotNull null
 			val (td1, td2) = tr.children()
-			val glink = td2.selectFirst("div.glink") ?: parseFailed("glink not found")
-			val a = glink.parents().select("a").first() ?: parseFailed("link not found")
+			val glink = td2.selectFirstOrThrow("div.glink")
+			val a = glink.parents().select("a").first() ?: glink.parseFailed("link not found")
 			val href = a.attrAsRelativeUrl("href")
-			val tagsDiv = glink.nextElementSibling() ?: parseFailed("tags div not found")
+			val tagsDiv = glink.nextElementSibling() ?: glink.parseFailed("tags div not found")
 			val mainTag = td2.selectFirst("div.cn")?.let { div ->
 				MangaTag(
 					title = div.text().toTitleCase(),
@@ -134,8 +132,8 @@ internal class ExHentaiParser(
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val doc = context.httpGet(manga.url.withDomain()).parseHtml()
-		val root = doc.body().selectFirst("div.gm") ?: parseFailed("Cannot find root")
+		val doc = context.httpGet(manga.url.toAbsoluteUrl(getDomain())).parseHtml()
+		val root = doc.body().selectFirstOrThrow("div.gm")
 		val cover = root.getElementById("gd1")?.children()?.first()
 		val title = root.getElementById("gd2")
 		val taglist = root.getElementById("taglist")
@@ -158,7 +156,7 @@ internal class ExHentaiParser(
 				a.text().toIntOrNull() != null
 			}?.let { a ->
 				val count = a.text().toInt()
-				val chapters = ArrayList<MangaChapter>(count)
+				val chapters = ChaptersListBuilder(count)
 				for (i in 1..count) {
 					val url = "${manga.url}?p=${i - 1}"
 					chapters += MangaChapter(
@@ -172,14 +170,14 @@ internal class ExHentaiParser(
 						branch = null,
 					)
 				}
-				chapters
+				chapters.toList()
 			},
 		)
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val doc = context.httpGet(chapter.url.withDomain()).parseHtml()
-		val root = doc.body().getElementById("gdt") ?: parseFailed("Root not found")
+		val doc = context.httpGet(chapter.url.toAbsoluteUrl(getDomain())).parseHtml()
+		val root = doc.body().requireElementById("gdt")
 		return root.select("a").map { a ->
 			val url = a.attrAsRelativeUrl("href")
 			MangaPage(
@@ -193,15 +191,13 @@ internal class ExHentaiParser(
 	}
 
 	override suspend fun getPageUrl(page: MangaPage): String {
-		val doc = context.httpGet(page.url.withDomain()).parseHtml()
-		return doc.body().getElementById("img")?.absUrl("src")
-			?: parseFailed("Image not found")
+		val doc = context.httpGet(page.url.toAbsoluteUrl(getDomain())).parseHtml()
+		return doc.body().requireElementById("img").attrAsAbsoluteUrl("src")
 	}
 
 	override suspend fun getTags(): Set<MangaTag> {
 		val doc = context.httpGet("https://${getDomain()}").parseHtml()
-		val root = doc.body().getElementById("searchbox")?.selectFirst("table")
-			?: parseFailed("Root not found")
+		val root = doc.body().requireElementById("searchbox").selectFirstOrThrow("table")
 		return root.select("div.cs").mapNotNullToSet { div ->
 			val id = div.id().substringAfterLast('_').toIntOrNull()
 				?: return@mapNotNullToSet null
@@ -222,7 +218,7 @@ internal class ExHentaiParser(
 			?: if (doc.getElementById("userlinksguest") != null) {
 				throw AuthRequiredException(source)
 			} else {
-				throw ParseException()
+				doc.parseFailed()
 			}
 		return username
 	}

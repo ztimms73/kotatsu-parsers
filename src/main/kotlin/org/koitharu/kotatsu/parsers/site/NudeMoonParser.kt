@@ -6,7 +6,6 @@ import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.exception.AuthRequiredException
-import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
@@ -48,7 +47,7 @@ internal class NudeMoonParser(
 		offset: Int,
 		query: String?,
 		tags: Set<MangaTag>?,
-		sortOrder: SortOrder?,
+		sortOrder: SortOrder,
 	): List<Manga> {
 		val domain = getDomain()
 		val url = when {
@@ -59,12 +58,13 @@ internal class NudeMoonParser(
 				postfix = "&rowstart=$offset",
 				transform = { it.key.urlEncoded() },
 			)
+
 			else -> "https://$domain/all_manga?${getSortKey(sortOrder)}&rowstart=$offset"
 		}
 		val doc = context.httpGet(url).parseHtml()
 		val root = doc.body().run {
 			selectFirst("td.main-bg") ?: selectFirst("td.main-body")
-		} ?: parseFailed("Cannot find root")
+		} ?: doc.parseFailed("Cannot find root")
 		return root.select("table.news_pic2").mapNotNull { row ->
 			val a = row.selectFirst("td.bg_style1")?.selectFirst("a")
 				?: return@mapNotNull null
@@ -100,9 +100,9 @@ internal class NudeMoonParser(
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val body = context.httpGet(manga.url.withDomain()).parseHtml().body()
+		val body = context.httpGet(manga.url.toAbsoluteUrl(getDomain())).parseHtml().body()
 		val root = body.selectFirst("table.shoutbox")
-			?: parseFailed("Cannot find root")
+			?: body.parseFailed("Cannot find root")
 		val info = root.select("div.tbl2")
 		val lastInfo = info.last()
 		return manga.copy(
@@ -136,14 +136,14 @@ internal class NudeMoonParser(
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val fullUrl = chapter.url.withDomain()
+		val fullUrl = chapter.url.toAbsoluteUrl(getDomain())
 		val doc = context.httpGet(fullUrl).parseHtml()
 		val mangaId = chapter.url.substringAfterLast('/').substringBefore('-').toIntOrNull()
 
 		val script = doc.select("script").firstNotNullOfOrNull {
 			it.html().takeIf { x -> x.contains(" images = new ") }
 		} ?: if (isAuthorized) {
-			parseFailed("Cannot find pages list")
+			doc.parseFailed("Cannot find pages list")
 		} else {
 			throw AuthRequiredException(source)
 		}
@@ -174,7 +174,7 @@ internal class NudeMoonParser(
 		val root = doc.body().getElementsContainingOwnText("Поиск манги по тегам")
 			.firstOrNull()?.parents()?.find { it.tag().normalName() == "tbody" }
 			?.selectFirst("td.textbox")?.selectFirst("td.small")
-			?: parseFailed("Tags root not found")
+			?: doc.parseFailed("Tags root not found")
 		return root.select("a").mapToSet {
 			MangaTag(
 				title = it.text().toTitleCase(),
@@ -197,7 +197,7 @@ internal class NudeMoonParser(
 				throw if (body.selectFirst("form[name=\"loginform\"]") != null) {
 					AuthRequiredException(source)
 				} else {
-					ParseException("Cannot find username")
+					body.parseFailed("Cannot find username")
 				}
 			}
 	}
@@ -206,8 +206,8 @@ internal class NudeMoonParser(
 		return "https://${getDomain()}/favicon.jpg"
 	}
 
-	private fun getSortKey(sortOrder: SortOrder?) =
-		when (sortOrder ?: sortOrders.minByOrNull { it.ordinal }) {
+	private fun getSortKey(sortOrder: SortOrder) =
+		when (sortOrder) {
 			SortOrder.POPULARITY -> "views"
 			SortOrder.NEWEST -> "date"
 			SortOrder.RATING -> "like"

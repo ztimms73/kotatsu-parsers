@@ -1,8 +1,8 @@
 package org.koitharu.kotatsu.parsers.site
 
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
-import org.koitharu.kotatsu.parsers.MangaParser
 import org.koitharu.kotatsu.parsers.MangaSourceParser
+import org.koitharu.kotatsu.parsers.PagedMangaParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
@@ -13,7 +13,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSONToSet
 import java.util.*
 
 @MangaSourceParser("DESUME", "Desu.me", "ru")
-internal class DesuMeParser(override val context: MangaLoaderContext) : MangaParser(MangaSource.DESUME) {
+internal class DesuMeParser(override val context: MangaLoaderContext) : PagedMangaParser(MangaSource.DESUME, 20) {
 
 	override val configKeyDomain = ConfigKey.Domain("desu.me", null)
 
@@ -24,13 +24,13 @@ internal class DesuMeParser(override val context: MangaLoaderContext) : MangaPar
 		SortOrder.ALPHABETICAL,
 	)
 
-	override suspend fun getList(
-		offset: Int,
+	override suspend fun getListPage(
+		page: Int,
 		query: String?,
 		tags: Set<MangaTag>?,
-		sortOrder: SortOrder?,
+		sortOrder: SortOrder,
 	): List<Manga> {
-		if (query != null && offset != 0) {
+		if (query != null && page != searchPaginator.firstPage) {
 			return emptyList()
 		}
 		val domain = getDomain()
@@ -40,7 +40,7 @@ internal class DesuMeParser(override val context: MangaLoaderContext) : MangaPar
 			append("/manga/api/?limit=20&order=")
 			append(getSortKey(sortOrder))
 			append("&page=")
-			append((offset / 20) + 1)
+			append(page)
 			if (!tags.isNullOrEmpty()) {
 				append("&genres=")
 				appendAll(tags, ",") { it.key }
@@ -51,7 +51,7 @@ internal class DesuMeParser(override val context: MangaLoaderContext) : MangaPar
 			}
 		}
 		val json = context.httpGet(url).parseJson().getJSONArray("response")
-			?: throw ParseException("Invalid response")
+			?: throw ParseException("Invalid response", url)
 		val total = json.length()
 		val list = ArrayList<Manga>(total)
 		for (i in 0 until total) {
@@ -82,9 +82,9 @@ internal class DesuMeParser(override val context: MangaLoaderContext) : MangaPar
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val url = manga.url.withDomain()
+		val url = manga.url.toAbsoluteUrl(getDomain())
 		val json = context.httpGet(url).parseJson().getJSONObject("response")
-			?: throw ParseException("Invalid response")
+			?: throw ParseException("Invalid response", url)
 		val baseChapterUrl = manga.url + "/chapter/"
 		val chaptersList = json.getJSONObject("chapters").getJSONArray("list")
 		val totalChapters = chaptersList.length()
@@ -117,10 +117,10 @@ internal class DesuMeParser(override val context: MangaLoaderContext) : MangaPar
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val fullUrl = chapter.url.withDomain()
+		val fullUrl = chapter.url.toAbsoluteUrl(getDomain())
 		val json = context.httpGet(fullUrl)
 			.parseJson()
-			.getJSONObject("response") ?: throw ParseException("Invalid response")
+			.getJSONObject("response") ?: throw ParseException("Invalid response", fullUrl)
 		return json.getJSONObject("pages").getJSONArray("list").mapJSON { jo ->
 			MangaPage(
 				id = generateUid(jo.getLong("id")),
@@ -134,23 +134,23 @@ internal class DesuMeParser(override val context: MangaLoaderContext) : MangaPar
 
 	override suspend fun getTags(): Set<MangaTag> {
 		val doc = context.httpGet("https://${getDomain()}/manga/").parseHtml()
-		val root = doc.body().getElementById("animeFilter")
-			?.selectFirst(".catalog-genres") ?: throw ParseException("Root not found")
+		val root = doc.body().requireElementById("animeFilter")
+			.selectFirstOrThrow(".catalog-genres")
 		return root.select("li").mapToSet {
-			val input = it.selectFirst("input") ?: parseFailed()
+			val input = it.selectFirstOrThrow("input")
 			MangaTag(
 				source = source,
 				key = input.attr("data-genre-slug").ifEmpty {
-					parseFailed("data-genre-slug is empty")
+					it.parseFailed("data-genre-slug is empty")
 				},
 				title = input.attr("data-genre-name").toTitleCase().ifEmpty {
-					parseFailed("data-genre-name is empty")
+					it.parseFailed("data-genre-name is empty")
 				},
 			)
 		}
 	}
 
-	private fun getSortKey(sortOrder: SortOrder?) =
+	private fun getSortKey(sortOrder: SortOrder) =
 		when (sortOrder) {
 			SortOrder.ALPHABETICAL -> "name"
 			SortOrder.POPULARITY -> "popular"

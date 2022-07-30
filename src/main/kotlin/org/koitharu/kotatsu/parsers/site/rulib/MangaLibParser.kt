@@ -1,13 +1,13 @@
-package org.koitharu.kotatsu.parsers.site
+package org.koitharu.kotatsu.parsers.site.rulib
 
 import androidx.collection.ArraySet
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
-import org.koitharu.kotatsu.parsers.MangaParser
 import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
 import org.koitharu.kotatsu.parsers.MangaSourceParser
+import org.koitharu.kotatsu.parsers.PagedMangaParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.exception.AuthRequiredException
 import org.koitharu.kotatsu.parsers.exception.ParseException
@@ -22,7 +22,7 @@ import java.util.*
 internal open class MangaLibParser(
 	override val context: MangaLoaderContext,
 	source: MangaSource,
-) : MangaParser(source), MangaParserAuthProvider {
+) : PagedMangaParser(source, pageSize = 60), MangaParserAuthProvider {
 
 	override val configKeyDomain = ConfigKey.Domain("mangalib.me", null)
 
@@ -37,16 +37,15 @@ internal open class MangaLibParser(
 		SortOrder.NEWEST,
 	)
 
-	override suspend fun getList(
-		offset: Int,
+	override suspend fun getListPage(
+		page: Int,
 		query: String?,
 		tags: Set<MangaTag>?,
-		sortOrder: SortOrder?,
+		sortOrder: SortOrder,
 	): List<Manga> {
 		if (!query.isNullOrEmpty()) {
-			return if (offset == 0) search(query) else emptyList()
+			return if (page == searchPaginator.firstPage) search(query) else emptyList()
 		}
-		val page = (offset / 60f).toIntUp()
 		val url = buildString {
 			append("https://")
 			append(getDomain())
@@ -60,7 +59,7 @@ internal open class MangaLibParser(
 			}
 		}
 		val doc = context.httpGet(url).parseHtml()
-		val root = doc.body().getElementById("manga-list") ?: throw ParseException("Root not found")
+		val root = doc.body().getElementById("manga-list") ?: doc.parseFailed("Root not found")
 		val items = root.selectFirst("div.media-cards-grid")?.select("div.media-card-wrap")
 			?: return emptyList()
 		return items.mapNotNull { card ->
@@ -84,15 +83,15 @@ internal open class MangaLibParser(
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val fullUrl = manga.url.withDomain()
+		val fullUrl = manga.url.toAbsoluteUrl(getDomain())
 		val doc = context.httpGet("$fullUrl?section=info").parseHtml()
-		val root = doc.body().getElementById("main-page") ?: throw ParseException("Root not found")
+		val root = doc.body().getElementById("main-page") ?: throw ParseException("Root not found", fullUrl)
 		val title = root.selectFirst("div.media-header__wrap")?.children()
 		val info = root.selectFirst("div.media-content")
 		val chaptersDoc = context.httpGet("$fullUrl?section=chapters").parseHtml()
 		val scripts = chaptersDoc.select("script")
 		val dateFormat = SimpleDateFormat("yyy-MM-dd", Locale.US)
-		var chapters: ArrayList<MangaChapter>? = null
+		var chapters: ChaptersListBuilder? = null
 		scripts@ for (script in scripts) {
 			val raw = script.html().lines()
 			for (line in raw) {
@@ -100,7 +99,7 @@ internal open class MangaLibParser(
 					val json = JSONObject(line.substringAfter('=').substringBeforeLast(';'))
 					val list = json.getJSONObject("chapters").getJSONArray("list")
 					val total = list.length()
-					chapters = ArrayList(total)
+					chapters = ChaptersListBuilder(total)
 					for (i in 0 until total) {
 						val item = list.getJSONObject(i)
 						val chapterId = item.getLong("chapter_id")
@@ -111,7 +110,6 @@ internal open class MangaLibParser(
 							append(item.getInt("chapter_volume"))
 							append("/c")
 							append(item.getString("chapter_number"))
-							@Suppress("BlockingMethodInNonBlockingContext") // lint issue
 							append('/')
 							append(item.optString("chapter_string"))
 						}
@@ -160,18 +158,18 @@ internal open class MangaLibParser(
 				} ?: manga.tags,
 			isNsfw = isNsfw(doc),
 			description = info?.selectFirst("div.media-description__text")?.html(),
-			chapters = chapters,
+			chapters = chapters?.toList(),
 		)
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val fullUrl = chapter.url.withDomain()
+		val fullUrl = chapter.url.toAbsoluteUrl(getDomain())
 		val doc = context.httpGet(fullUrl).parseHtml()
-		if (doc.location().endsWith("/register")) {
+		if (doc.location().substringBefore('?').endsWith("/register")) {
 			throw AuthRequiredException(source)
 		}
 		val scripts = doc.head().select("script")
-		val pg = (doc.body().getElementById("pg")?.html() ?: parseFailed("Element #pg not found"))
+		val pg = (doc.body().getElementById("pg")?.html() ?: doc.parseFailed("Element #pg not found"))
 			.substringAfter('=')
 			.substringBeforeLast(';')
 		val pages = JSONArray(pg)
@@ -201,7 +199,7 @@ internal open class MangaLibParser(
 				}
 			}
 		}
-		throw ParseException("Script with info not found")
+		throw ParseException("Script with info not found", fullUrl)
 	}
 
 	override suspend fun getTags(): Set<MangaTag> {
@@ -224,7 +222,7 @@ internal open class MangaLibParser(
 				return result
 			}
 		}
-		throw ParseException("Script with genres not found")
+		throw ParseException("Script with genres not found", url)
 	}
 
 	override val isAuthorized: Boolean
@@ -239,13 +237,13 @@ internal open class MangaLibParser(
 		if (body.baseUri().endsWith("/login")) {
 			throw AuthRequiredException(source)
 		}
-		return body.selectFirst(".profile-user__username")?.text() ?: parseFailed("Cannot find username")
+		return body.selectFirst(".profile-user__username")?.text() ?: body.parseFailed("Cannot find username")
 	}
 
 	protected open fun isNsfw(doc: Document): Boolean {
 		val sidebar = doc.body().run {
 			selectFirst(".media-sidebar") ?: selectFirst(".media-info")
-		} ?: parseFailed("Sidebar not found")
+		} ?: doc.parseFailed("Sidebar not found")
 		return sidebar.getElementsContainingOwnText("18+").isNotEmpty()
 	}
 
@@ -279,8 +277,8 @@ internal open class MangaLibParser(
 				state = null,
 				isNsfw = false,
 				source = source,
-				coverUrl = covers.getString("thumbnail").withDomain(),
-				largeCoverUrl = covers.getString("default").withDomain(),
+				coverUrl = covers.getString("thumbnail").toAbsoluteUrl(domain),
+				largeCoverUrl = covers.getString("default").toAbsoluteUrl(domain),
 			)
 		}
 	}

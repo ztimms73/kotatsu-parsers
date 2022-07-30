@@ -4,7 +4,6 @@ import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaParser
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
-import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.DateFormat
@@ -29,7 +28,7 @@ internal class MangaTownParser(override val context: MangaLoaderContext) : Manga
 		offset: Int,
 		query: String?,
 		tags: Set<MangaTag>?,
-		sortOrder: SortOrder?,
+		sortOrder: SortOrder,
 	): List<Manga> {
 		val sortKey = when (sortOrder) {
 			SortOrder.ALPHABETICAL -> "?name.az"
@@ -43,19 +42,19 @@ internal class MangaTownParser(override val context: MangaLoaderContext) : Manga
 				if (offset != 0) {
 					return emptyList()
 				}
-				"/search?name=${query.urlEncoded()}".withDomain()
+				"/search?name=${query.urlEncoded()}".toAbsoluteUrl(getDomain())
 			}
-			tags.isNullOrEmpty() -> "/directory/$page.htm$sortKey".withDomain()
-			tags.size == 1 -> "/directory/${tags.first().key}/$page.htm$sortKey".withDomain()
+
+			tags.isNullOrEmpty() -> "/directory/$page.htm$sortKey".toAbsoluteUrl(getDomain())
+			tags.size == 1 -> "/directory/${tags.first().key}/$page.htm$sortKey".toAbsoluteUrl(getDomain())
 			else -> tags.joinToString(
-				prefix = "/search?page=$page".withDomain(),
+				prefix = "/search?page=$page".toAbsoluteUrl(getDomain()),
 			) { tag ->
 				"&genres[${tag.key}]=1"
 			}
 		}
 		val doc = context.httpGet(url).parseHtml()
-		val root = doc.body().selectFirst("ul.manga_pic_list")
-			?: throw ParseException("Root not found")
+		val root = doc.body().selectFirstOrThrow("ul.manga_pic_list")
 		return root.select("li").mapNotNull { li ->
 			val a = li.selectFirst("a.manga_cover")
 			val href = a?.attrAsRelativeUrlOrNull("href")
@@ -94,9 +93,9 @@ internal class MangaTownParser(override val context: MangaLoaderContext) : Manga
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val doc = context.httpGet(manga.url.withDomain()).parseHtml()
-		val root = doc.body().selectFirst("section.main")
-			?.selectFirst("div.article_content") ?: throw ParseException("Cannot find root")
+		val doc = context.httpGet(manga.url.toAbsoluteUrl(getDomain())).parseHtml()
+		val root = doc.body().selectFirstOrThrow("section.main")
+			.selectFirstOrThrow("div.article_content")
 		val info = root.selectFirst("div.detail_info")?.selectFirst("ul")
 		val chaptersList = root.selectFirst("div.chapter_content")
 			?.selectFirst("ul.chapter_list")?.select("li")?.asReversed()
@@ -112,9 +111,9 @@ internal class MangaTownParser(override val context: MangaLoaderContext) : Manga
 				)
 			}.orEmpty(),
 			description = info?.getElementById("show")?.ownText(),
-			chapters = chaptersList?.mapIndexedNotNull { i, li ->
+			chapters = chaptersList?.mapChapters { i, li ->
 				val href = li.selectFirst("a")?.attrAsRelativeUrlOrNull("href")
-					?: return@mapIndexedNotNull null
+					?: return@mapChapters null
 				val name = li.select("span")
 					.filter { x -> x.className().isEmpty() }
 					.joinToString(" - ") { it.text() }.trim()
@@ -136,11 +135,10 @@ internal class MangaTownParser(override val context: MangaLoaderContext) : Manga
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val fullUrl = chapter.url.withDomain()
+		val fullUrl = chapter.url.toAbsoluteUrl(getDomain())
 		val doc = context.httpGet(fullUrl).parseHtml()
-		val root = doc.body().selectFirst("div.page_select")
-			?: throw ParseException("Cannot find root")
-		return root.selectFirst("select")?.select("option")?.mapNotNull {
+		val root = doc.body().selectFirstOrThrow("div.page_select")
+		return root.selectFirstOrThrow("select").selectOrThrow("option").mapNotNull {
 			val href = it.attrAsRelativeUrlOrNull("value")
 			if (href == null || href.endsWith("featured.html")) {
 				return@mapNotNull null
@@ -152,20 +150,20 @@ internal class MangaTownParser(override val context: MangaLoaderContext) : Manga
 				referer = fullUrl,
 				source = MangaSource.MANGATOWN,
 			)
-		} ?: parseFailed("Pages list not found")
+		}
 	}
 
 	override suspend fun getPageUrl(page: MangaPage): String {
-		val doc = context.httpGet(page.url.withDomain()).parseHtml()
-		return doc.getElementById("image")?.absUrl("src") ?: parseFailed("Image not found")
+		val doc = context.httpGet(page.url.toAbsoluteUrl(getDomain())).parseHtml()
+		return doc.requireElementById("image").attrAsAbsoluteUrl("src")
 	}
 
 	override suspend fun getTags(): Set<MangaTag> {
-		val doc = context.httpGet("/directory/".withDomain()).parseHtml()
+		val doc = context.httpGet("/directory/".toAbsoluteUrl(getDomain())).parseHtml()
 		val root = doc.body().selectFirst("aside.right")
 			?.getElementsContainingOwnText("Genres")
 			?.first()
-			?.nextElementSibling() ?: parseFailed("Root not found")
+			?.nextElementSibling() ?: doc.parseFailed("Root not found")
 		return root.select("li").mapNotNullToSet { li ->
 			val a = li.selectFirst("a") ?: return@mapNotNullToSet null
 			val key = a.attr("href").parseTagKey()
@@ -190,7 +188,7 @@ internal class MangaTownParser(override val context: MangaLoaderContext) : Manga
 	}
 
 	private suspend fun bypassLicensedChapters(manga: Manga): List<MangaChapter> {
-		val doc = context.httpGet(manga.url.withDomain("m")).parseHtml()
+		val doc = context.httpGet(manga.url.toAbsoluteUrl(getDomain("m"))).parseHtml()
 		val list = doc.body().selectFirst("ul.detail-ch-list") ?: return emptyList()
 		val dateFormat = SimpleDateFormat("MMM dd,yyyy", Locale.US)
 		return list.select("li").asReversed().mapIndexedNotNull { i, li ->

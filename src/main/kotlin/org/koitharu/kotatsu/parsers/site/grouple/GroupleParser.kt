@@ -1,10 +1,12 @@
-package org.koitharu.kotatsu.parsers.site
+package org.koitharu.kotatsu.parsers.site.grouple
 
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Response
 import org.json.JSONArray
 import org.koitharu.kotatsu.parsers.MangaParser
+import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
+import org.koitharu.kotatsu.parsers.exception.AuthRequiredException
 import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
@@ -17,9 +19,13 @@ private const val PAGE_SIZE_SEARCH = 50
 private const val NSFW_ALERT = "сексуальные сцены"
 private const val NOTHING_FOUND = "Ничего не найдено"
 
-internal abstract class GroupleParser(source: MangaSource, userAgent: String) : MangaParser(source) {
+internal abstract class GroupleParser(
+	source: MangaSource,
+	userAgent: String,
+	private val siteId: Int,
+) : MangaParser(source), MangaParserAuthProvider {
 
-	private val headers = Headers.Builder()
+	override val headers = Headers.Builder()
 		.add("User-Agent", userAgent)
 		.build()
 
@@ -30,11 +36,20 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 		SortOrder.RATING,
 	)
 
+	override val authUrl: String
+		get() {
+			val targetUri = "https://${getDomain()}/".urlEncoded()
+			return "https://grouple.co/internal/auth/sso?siteId=$siteId&=targetUri=$targetUri"
+		}
+
+	override val isAuthorized: Boolean
+		get() = context.cookieJar.getCookies(getDomain()).any { it.name == "gwt" }
+
 	override suspend fun getList(
 		offset: Int,
 		query: String?,
 		tags: Set<MangaTag>?,
-		sortOrder: SortOrder?,
+		sortOrder: SortOrder,
 	): List<Manga> {
 		val domain = getDomain()
 		val doc = when {
@@ -46,33 +61,32 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 				),
 				headers,
 			)
+
 			tags.isNullOrEmpty() -> context.httpGet(
 				"https://$domain/list?sortType=${
-				getSortKey(
-					sortOrder,
-				)
+					getSortKey(sortOrder)
 				}&offset=${offset upBy PAGE_SIZE}",
 				headers,
 			)
+
 			tags.size == 1 -> context.httpGet(
 				"https://$domain/list/genre/${tags.first().key}?sortType=${
-				getSortKey(
-					sortOrder,
-				)
+					getSortKey(sortOrder)
 				}&offset=${offset upBy PAGE_SIZE}",
 				headers,
 			)
+
 			offset > 0 -> return emptyList()
 			else -> advancedSearch(domain, tags)
 		}.parseHtml().body()
 		val root = (doc.getElementById("mangaBox") ?: doc.getElementById("mangaResults"))
-			?: throw ParseException("Cannot find root")
+			?: doc.parseFailed("Cannot find root")
 		val tiles = root.selectFirst("div.tiles.row") ?: if (
 			root.select(".alert").any { it.ownText() == NOTHING_FOUND }
 		) {
 			return emptyList()
 		} else {
-			parseFailed("No tiles found")
+			doc.parseFailed("No tiles found")
 		}
 		val baseHost = root.baseUri().toHttpUrl().host
 		return tiles.select("div.tile").mapNotNull { node ->
@@ -95,7 +109,7 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 				publicUrl = href,
 				title = title,
 				altTitle = descDiv.selectFirst("h4")?.text(),
-				coverUrl = imgDiv.selectFirst("img.lazy")?.attr("data-original").orEmpty(),
+				coverUrl = imgDiv.selectFirst("img.lazy")?.attr("data-original")?.replace("_p.", ".").orEmpty(),
 				rating = runCatching {
 					node.selectFirst("div.rating")
 						?.attr("title")
@@ -118,6 +132,7 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 				state = when {
 					node.selectFirst("div.tags")
 						?.selectFirst("span.mangaCompleted") != null -> MangaState.FINISHED
+
 					else -> null
 				},
 				source = source,
@@ -126,9 +141,9 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val doc = context.httpGet(manga.url.withDomain(), headers).parseHtml()
+		val doc = context.httpGet(manga.url.toAbsoluteUrl(getDomain()), headers).parseHtml()
 		val root = doc.body().getElementById("mangaBox")?.selectFirst("div.leftContent")
-			?: throw ParseException("Cannot find root")
+			?: doc.parseFailed("Cannot find root")
 		val dateFormat = SimpleDateFormat("dd.MM.yy", Locale.US)
 		val coverImg = root.selectFirst("div.subject-cover")?.selectFirst("img")
 		return manga.copy(
@@ -144,10 +159,11 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 						source = source,
 					)
 				},
+			author = root.selectFirst("a.person-link")?.text() ?: manga.author,
 			isNsfw = root.select(".alert-warning").any { it.ownText().contains(NSFW_ALERT) },
 			chapters = root.selectFirst("div.chapters-link")?.selectFirst("table")
-				?.select("tr:has(td > a)")?.asReversed()?.mapIndexedNotNull { i, tr ->
-					val a = tr.selectFirst("a") ?: return@mapIndexedNotNull null
+				?.select("tr:has(td > a)")?.asReversed()?.mapChapters { i, tr ->
+					val a = tr.selectFirst("a") ?: return@mapChapters null
 					val href = a.attrAsRelativeUrl("href")
 					var translators = ""
 					val translatorElement = a.attr("title")
@@ -171,7 +187,7 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val doc = context.httpGet(chapter.url.withDomain() + "?mtr=1", headers).parseHtml()
+		val doc = context.httpGet(chapter.url.toAbsoluteUrl(getDomain()) + "?mtr=1", headers).parseHtml()
 		val scripts = doc.select("script")
 		for (script in scripts) {
 			val data = script.html()
@@ -203,7 +219,7 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 				)
 			}
 		}
-		throw ParseException("Pages list not found at ${chapter.url}")
+		doc.parseFailed("Pages list not found at ${chapter.url}")
 	}
 
 	override suspend fun getPageUrl(page: MangaPage): String {
@@ -217,14 +233,14 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 				return url
 			}
 		}
-		val fallbackServer = servers.firstOrNull() ?: parseFailed("Cannot find any page url")
+		val fallbackServer = servers.firstOrNull() ?: throw ParseException("Cannot find any page url", page.url)
 		return fallbackServer + path
 	}
 
 	override suspend fun getTags(): Set<MangaTag> {
 		val doc = context.httpGet("https://${getDomain()}/list/genres/sort_name", headers).parseHtml()
 		val root = doc.body().getElementById("mangaBox")?.selectFirst("div.leftContent")
-			?.selectFirst("table.table") ?: parseFailed("Cannot find root")
+			?.selectFirst("table.table") ?: doc.parseFailed("Cannot find root")
 		return root.select("a.element-link").mapToSet { a ->
 			MangaTag(
 				title = a.text().toTitleCase(),
@@ -234,14 +250,22 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 		}
 	}
 
-	private fun getSortKey(sortOrder: SortOrder?) =
-		when (sortOrder ?: sortOrders.minByOrNull { it.ordinal }) {
+	override suspend fun getUsername(): String {
+		val root = context.httpGet("https://grouple.co/").parseHtml().body()
+		val element = root.selectFirst("img.user-avatar") ?: throw AuthRequiredException(source)
+		val res = element.parent()?.text()
+		return if (res.isNullOrEmpty()) {
+			root.parseFailed("Cannot find username")
+		} else res
+	}
+
+	private fun getSortKey(sortOrder: SortOrder) =
+		when (sortOrder) {
 			SortOrder.ALPHABETICAL -> "name"
 			SortOrder.POPULARITY -> "rate"
 			SortOrder.UPDATED -> "updated"
 			SortOrder.NEWEST -> "created"
 			SortOrder.RATING -> "votes"
-			null -> "updated"
 		}
 
 	private suspend fun advancedSearch(domain: String, tags: Set<MangaTag>): Response {
@@ -250,21 +274,21 @@ internal abstract class GroupleParser(source: MangaSource, userAgent: String) : 
 		val tagsIndex = context.httpGet(url, headers).parseHtml()
 			.body().selectFirst("form.search-form")
 			?.select("div.form-group")
-			?.get(1) ?: parseFailed("Genres filter element not found")
+			?.get(1) ?: throw ParseException("Genres filter element not found", url)
 		val tagNames = tags.map { it.title.lowercase() }
 		val payload = HashMap<String, String>()
 		var foundGenres = 0
 		tagsIndex.select("li.property").forEach { li ->
 			val name = li.text().trim().lowercase()
 			val id = li.selectFirst("input")?.id()
-				?: parseFailed("Id for tag $name not found")
+				?: li.parseFailed("Id for tag $name not found")
 			payload[id] = if (name in tagNames) {
 				foundGenres++
 				"in"
 			} else ""
 		}
 		if (foundGenres != tags.size) {
-			parseFailed("Some genres are not found")
+			tagsIndex.parseFailed("Some genres are not found")
 		}
 		// Step 2: advanced search
 		payload["q"] = ""

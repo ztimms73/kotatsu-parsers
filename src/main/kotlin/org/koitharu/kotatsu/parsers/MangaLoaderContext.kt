@@ -1,12 +1,14 @@
 package org.koitharu.kotatsu.parsers
 
 import okhttp3.*
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.jsoup.HttpStatusException
 import org.koitharu.kotatsu.parsers.config.MangaSourceConfig
 import org.koitharu.kotatsu.parsers.exception.GraphQLException
+import org.koitharu.kotatsu.parsers.exception.NotFoundException
 import org.koitharu.kotatsu.parsers.model.MangaSource
 import org.koitharu.kotatsu.parsers.util.await
 import org.koitharu.kotatsu.parsers.util.parseJson
@@ -18,7 +20,12 @@ abstract class MangaLoaderContext {
 
 	abstract val cookieJar: CookieJar
 
-	suspend fun httpGet(url: String, headers: Headers? = null): Response {
+	/**
+	 * Do a GET http request to specific url
+	 * @param url
+	 * @param headers an additional headers for request, may be null
+	 */
+	suspend fun httpGet(url: HttpUrl, headers: Headers? = null): Response {
 		val request = Request.Builder()
 			.get()
 			.url(url)
@@ -28,6 +35,16 @@ abstract class MangaLoaderContext {
 		return httpClient.newCall(request.build()).await().ensureSuccess()
 	}
 
+	suspend fun httpGet(url: String, headers: Headers? = null): Response {
+		return httpGet(url.toHttpUrl(), headers)
+	}
+
+
+	/**
+	 * Do a HEAD http request to specific url
+	 * @param url
+	 * @param headers an additional headers for request, may be null
+	 */
 	suspend fun httpHead(url: String, headers: Headers? = null): Response {
 		val request = Request.Builder()
 			.head()
@@ -38,6 +55,12 @@ abstract class MangaLoaderContext {
 		return httpClient.newCall(request.build()).await().ensureSuccess()
 	}
 
+	/**
+	 * Do a POST http request to specific url with `multipart/form-data` payload
+	 * @param url
+	 * @param form payload as key=>value map
+	 * @param headers an additional headers for request, may be null
+	 */
 	suspend fun httpPost(
 		url: String,
 		form: Map<String, String>,
@@ -56,6 +79,12 @@ abstract class MangaLoaderContext {
 		return httpClient.newCall(request.build()).await().ensureSuccess()
 	}
 
+	/**
+	 * Do a POST http request to specific url with `multipart/form-data` payload
+	 * @param url
+	 * @param payload payload as `key=value` string with `&` separator
+	 * @param headers an additional headers for request, may be null
+	 */
 	suspend fun httpPost(
 		url: String,
 		payload: String,
@@ -79,6 +108,11 @@ abstract class MangaLoaderContext {
 		return httpClient.newCall(request.build()).await().ensureSuccess()
 	}
 
+	/**
+	 * Do a GraphQL request to specific url
+	 * @param endpoint an url
+	 * @param query GraphQL request payload
+	 */
 	suspend fun graphQLQuery(endpoint: String, query: String): JSONObject {
 		val body = JSONObject()
 		body.put("operationName", null as Any?)
@@ -104,12 +138,18 @@ abstract class MangaLoaderContext {
 
 	open fun getPreferredLocales(): List<Locale> = listOf(Locale.getDefault())
 
+	/**
+	 * Execute JavaScript code and return result
+	 * @param script JavaScript source code
+	 * @return execution result as string, may be null
+	 */
 	abstract suspend fun evaluateJs(script: String): String?
 
 	abstract fun getConfig(source: MangaSource): MangaSourceConfig
 
-	private fun Response.ensureSuccess() = apply {
+	private fun Response.ensureSuccess(): Response {
 		val exception: Exception? = when (code) { // Catch some error codes, not all
+			404 -> NotFoundException(message, request.url.toString())
 			in 500..599 -> HttpStatusException(message, code, request.url.toString())
 			else -> null
 		}
@@ -121,5 +161,6 @@ abstract class MangaLoaderContext {
 			}
 			throw exception
 		}
+		return this
 	}
 }

@@ -6,11 +6,12 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
-import org.koitharu.kotatsu.parsers.MangaParser
 import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
 import org.koitharu.kotatsu.parsers.MangaSourceParser
+import org.koitharu.kotatsu.parsers.PagedMangaParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.exception.AuthRequiredException
+import org.koitharu.kotatsu.parsers.exception.ContentUnavailableException
 import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
@@ -31,7 +32,7 @@ private const val STATUS_FINISHED = 0
 @MangaSourceParser("REMANGA", "Remanga", "ru")
 internal class RemangaParser(
 	override val context: MangaLoaderContext,
-) : MangaParser(MangaSource.REMANGA), MangaParserAuthProvider {
+) : PagedMangaParser(MangaSource.REMANGA, PAGE_SIZE), MangaParserAuthProvider {
 
 	override val configKeyDomain = ConfigKey.Domain("remanga.org", null)
 	override val authUrl: String
@@ -53,11 +54,11 @@ internal class RemangaParser(
 
 	private val regexLastUrlPath = Regex("/[^/]+/?$")
 
-	override suspend fun getList(
-		offset: Int,
+	override suspend fun getListPage(
+		page: Int,
 		query: String?,
 		tags: Set<MangaTag>?,
-		sortOrder: SortOrder?,
+		sortOrder: SortOrder,
 	): List<Manga> {
 		copyCookies()
 		val domain = getDomain()
@@ -77,7 +78,7 @@ internal class RemangaParser(
 		}
 		urlBuilder
 			.append("&page=")
-			.append((offset / PAGE_SIZE) + 1)
+			.append(page)
 			.append("&count=")
 			.append(PAGE_SIZE)
 		val content = context.httpGet(urlBuilder.toString(), getApiHeaders()).parseJson()
@@ -113,18 +114,18 @@ internal class RemangaParser(
 		copyCookies()
 		val domain = getDomain()
 		val slug = manga.url.find(regexLastUrlPath)
-			?: throw ParseException("Cannot obtain slug from ${manga.url}")
+			?: throw ParseException("Cannot obtain slug from ${manga.url}", manga.publicUrl)
 		val data = context.httpGet(
-			url = "https://api.$domain/api/titles/$slug/",
+			url = "https://api.$domain/api/titles$slug/",
 			headers = getApiHeaders(),
 		).handle401().parseJson()
 		val content = try {
 			data.getJSONObject("content")
 		} catch (e: JSONException) {
-			throw ParseException(data.optString("msg"), e)
+			throw ParseException(data.optString("msg"), manga.publicUrl, e)
 		}
 		val branchId = content.getJSONArray("branches").optJSONObject(0)
-			?.getLong("id") ?: throw ParseException("No branches found")
+			?.getLong("id") ?: throw ParseException("No branches found", manga.publicUrl)
 		val chapters = grabChapters(domain, branchId)
 		val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
 		return manga.copy(
@@ -141,7 +142,7 @@ internal class RemangaParser(
 					source = MangaSource.REMANGA,
 				)
 			},
-			chapters = chapters.mapIndexed { i, jo ->
+			chapters = chapters.mapChapters { i, jo ->
 				val id = jo.getLong("id")
 				val name = jo.getString("name").toTitleCase(Locale.ROOT)
 				val publishers = jo.optJSONArray("publishers")
@@ -171,7 +172,7 @@ internal class RemangaParser(
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val referer = "https://${getDomain()}/"
-		val content = context.httpGet(chapter.url.withDomain(subdomain = "api"), getApiHeaders())
+		val content = context.httpGet(chapter.url.toAbsoluteUrl(getDomain("api")), getApiHeaders())
 			.handle401()
 			.parseJson()
 			.getJSONObject("content")
@@ -182,9 +183,9 @@ internal class RemangaParser(
 			}
 			if (pubDate != null && pubDate > System.currentTimeMillis()) {
 				val at = SimpleDateFormat.getDateInstance(DateFormat.LONG).format(Date(pubDate))
-				parseFailed("Глава станет доступной $at")
+				throw ContentUnavailableException("Глава станет доступной $at")
 			} else {
-				parseFailed("Глава недоступна")
+				throw ContentUnavailableException("Глава недоступна")
 			}
 		}
 		val result = ArrayList<MangaPage>(pages.length())
@@ -192,7 +193,7 @@ internal class RemangaParser(
 			when (val item = pages.get(i)) {
 				is JSONObject -> result += parsePage(item, referer)
 				is JSONArray -> item.mapJSONTo(result) { parsePage(it, referer) }
-				else -> throw ParseException("Unknown json item $item")
+				else -> throw ParseException("Unknown json item $item", chapter.url)
 			}
 		}
 		return result

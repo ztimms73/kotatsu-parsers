@@ -8,12 +8,16 @@ import com.google.devtools.ksp.symbol.KSClassDeclaration
 import com.google.devtools.ksp.symbol.KSVisitorVoid
 import com.google.devtools.ksp.validate
 import java.io.Writer
+import java.util.*
 
 class ParserProcessor(
 	private val codeGenerator: CodeGenerator,
 	private val logger: KSPLogger,
 	private val options: Map<String, String>,
 ) : SymbolProcessor {
+
+	private val availableLocales = Locale.getAvailableLocales().toSet()
+	private val sourceNamePattern = Regex("[A-Z_][A-Z0-9_]{3,}")
 
 	override fun process(resolver: Resolver): List<KSAnnotated> {
 		val symbols = resolver
@@ -73,8 +77,6 @@ class ParserProcessor(
 			"""
 				package org.koitharu.kotatsu.parsers.model
 				
-				import org.koitharu.kotatsu.parsers.model.MangaSource
-				
 				enum class MangaSource(
 					val title: String,
 					val locale: String?,
@@ -123,8 +125,13 @@ class ParserProcessor(
 			val title = annotation.arguments.single { it.name?.asString() == "title" }.value as String
 			val locale = annotation.arguments.single { it.name?.asString() == "locale" }.value as String
 			val localeString = if (locale.isEmpty()) "null" else "\"$locale\""
+			val localeObj = if (locale.isEmpty()) null else Locale(locale)
+			val localeTitle = localeObj?.getDisplayLanguage(localeObj)
+			if (localeObj != null && localeObj !in availableLocales) {
+				logger.error("Manga source $name has wrong locale: $localeTitle")
+			}
 
-			if (name.any { it.isLowerCase() }) {
+			if (!sourceNamePattern.matches(name)) {
 				logger.error("Manga source name must be uppercase: $name")
 			}
 
@@ -138,7 +145,8 @@ class ParserProcessor(
 
 			val className = classDeclaration.qualifiedName?.asString()
 			factoryWriter?.write("\tMangaSource.$name -> $className(context)\n")
-			sourcesWriter?.write("\t$name(\"$title\", $localeString),\n")
+			val localeComment = localeTitle?.toTitleCase(localeObj)?.let { " /* $it */" }.orEmpty()
+			sourcesWriter?.write("\t$name(\"$title\", $localeString$localeComment),\n")
 		}
 	}
 }
